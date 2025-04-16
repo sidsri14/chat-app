@@ -1,1 +1,1 @@
-this is a chat-app using websockets 
+this is a chat-app using websocket
