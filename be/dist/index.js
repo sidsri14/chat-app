@@ -22,13 +22,18 @@ function broadcast(room, payload, exclude) {
     const data = JSON.stringify(payload);
     allSockets.forEach((user) => {
         if (user.room === room && user.socket !== exclude) {
-            user.socket.send(data);
+            try {
+                user.socket.send(data);
+            }
+            catch (err) {
+                console.error(`Failed to send to user ${user.username}:`, err);
+            }
         }
     });
 }
 wss.on('connection', (socket) => {
     socket.on('message', (data) => {
-        var _a, _b, _c;
+        var _a, _b, _c, _d;
         try {
             const parsed = JSON.parse(data.toString());
             if (parsed.type === 'join') {
@@ -69,6 +74,15 @@ wss.on('connection', (socket) => {
                 }
                 roomMessages.get(currentUser.room).push(msg);
                 broadcast(currentUser.room, { type: 'chat', payload: msg });
+            }
+            if (parsed.type === 'typing') {
+                const currentUser = allSockets.find((x) => x.socket === socket);
+                if (!currentUser)
+                    return;
+                broadcast(currentUser.room, {
+                    type: 'typing',
+                    payload: { username: currentUser.username, isTyping: !!((_d = parsed.payload) === null || _d === void 0 ? void 0 : _d.isTyping) },
+                }, socket);
             }
         }
         catch (e) {

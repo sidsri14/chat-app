@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 
 type ChatMessage = {
   type: "chat";
@@ -21,18 +21,60 @@ function App() {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [connected, setConnected] = useState(false);
   const [input, setInput] = useState("");
+  const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
+
   const wsRef = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const typingTimeoutRef = useRef<any>(null);
+  const reconnectTimeoutRef = useRef<any>(null);
+  const reconnectAttemptsRef = useRef(0);
 
-  useEffect(() => {
+  const connect = useCallback(() => {
+    // If already connecting or connected, don't start another
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = import.meta.env.DEV
-      ? "ws://localhost:8080"
+      ? "ws://127.0.0.1:8080"
       : `${protocol}//${window.location.host}`;
 
+    console.log(`Attempting to connect to ${wsUrl}...`);
     const ws = new WebSocket(wsUrl);
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => setConnected(false);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log("Connected to server successfully");
+      setConnected(true);
+      reconnectAttemptsRef.current = 0;
+      
+      // Re-join if we were already in a room
+      if (joined && roomId && username) {
+        ws.send(JSON.stringify({
+          type: "join",
+          payload: { roomId: roomId.trim(), username: username.trim() },
+        }));
+      }
+    };
+
+    ws.onclose = () => {
+      console.log("Connection closed");
+      setConnected(false);
+      
+      // Exponential backoff
+      const timeout = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000);
+      reconnectAttemptsRef.current += 1;
+      
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = setTimeout(() => {
+        connect();
+      }, timeout);
+    };
+
+    ws.onerror = (err) => {
+      console.error("WebSocket transport error:", err);
+    };
 
     ws.onmessage = (event) => {
       try {
@@ -54,19 +96,35 @@ function App() {
             ...prev,
             { type: "system" as const, message: parsed.payload.message },
           ]);
+        } else if (parsed.type === "typing") {
+          const { username: typingUser, isTyping } = parsed.payload;
+          setTypingUsers((prev) => {
+            const next = new Set(prev);
+            if (isTyping) next.add(typingUser);
+            else next.delete(typingUser);
+            return next;
+          });
         }
       } catch {
         // ignore malformed messages
       }
     };
+  }, [joined, roomId, username]);
 
-    wsRef.current = ws;
-    return () => ws.close();
-  }, []);
+  useEffect(() => {
+    connect();
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.onclose = null; // Prevent reconnection on cleanup
+        wsRef.current.close();
+      }
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+    };
+  }, [connect]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, typingUsers]);
 
   const joinRoom = () => {
     if (!username.trim() || !roomId.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -85,6 +143,29 @@ function App() {
       JSON.stringify({ type: "chat", payload: { message: input.trim() } })
     );
     setInput("");
+    
+    // Stop typing immediately on send
+    wsRef.current.send(
+      JSON.stringify({ type: "typing", payload: { isTyping: false } })
+    );
+  };
+
+  const handeInputChange = (val: string) => {
+    setInput(val);
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    // Send typing notification
+    wsRef.current.send(
+      JSON.stringify({ type: "typing", payload: { isTyping: true } })
+    );
+
+    // Stop typing indicator after 2 seconds of inactivity
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      wsRef.current?.send(
+        JSON.stringify({ type: "typing", payload: { isTyping: false } })
+      );
+    }, 2000);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -94,46 +175,74 @@ function App() {
     }
   };
 
+  const otherTypingUsers = useMemo(() => {
+    const list = Array.from(typingUsers).filter(u => u !== username);
+    if (list.length === 0) return "";
+    if (list.length === 1) return `${list[0]} is typing...`;
+    return `${list.join(", ")} are typing...`;
+  }, [typingUsers, username]);
+
   if (!joined) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-gray-950 text-white">
-        <div className="w-full max-w-sm rounded-2xl border border-gray-800 bg-gray-900 p-8 flex flex-col gap-4">
-          <div className="text-center mb-2">
-            <h1 className="text-2xl font-bold tracking-tight">Chat App</h1>
-            <p className="mt-1 text-sm text-gray-400">
-              Enter a room to start chatting
-            </p>
+      <div className="flex h-screen w-screen items-center justify-center bg-black selection:bg-blue-500/30">
+        {/* Background Gradients */}
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+          <div className="absolute -top-1/4 -left-1/4 w-1/2 h-1/2 bg-blue-600/20 blur-[120px] animate-pulse" />
+          <div className="absolute -bottom-1/4 -right-1/4 w-1/2 h-1/2 bg-indigo-600/20 blur-[120px] animate-pulse delay-700" />
+        </div>
+
+        <div className="relative w-full max-w-md mx-4 overflow-hidden rounded-3xl border border-white/10 bg-white/5 p-8 backdrop-blur-2xl shadow-2xl">
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600/20 text-blue-400 mb-4 border border-blue-500/20">
+               <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
+            </div>
+            <h1 className="text-3xl font-bold tracking-tight text-white mb-2">Connect</h1>
+            <p className="text-gray-400">Join a secure room to start chatting</p>
           </div>
 
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Your name"
-            autoFocus
-            className="rounded-lg border border-gray-700 bg-gray-800 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-          />
-          <input
-            value={roomId}
-            onChange={(e) => setRoomId(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Room ID"
-            className="rounded-lg border border-gray-700 bg-gray-800 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-          />
+          <div className="flex flex-col gap-5">
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-wider text-gray-500 ml-1">Your Alias</label>
+              <input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="How should others see you?"
+                autoFocus
+                className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-gray-600 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 outline-none transition-all"
+              />
+            </div>
 
-          <button
-            onClick={joinRoom}
-            disabled={!username.trim() || !roomId.trim() || !connected}
-            className="rounded-lg bg-blue-600 py-3 text-sm font-semibold transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Join Room
-          </button>
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-wider text-gray-500 ml-1">Room Key</label>
+              <input
+                value={roomId}
+                onChange={(e) => setRoomId(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Enter room ID"
+                className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-white placeholder:text-gray-600 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 outline-none transition-all"
+              />
+            </div>
 
-          <div className="flex items-center justify-center gap-2 text-xs text-gray-500">
-            <span
-              className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-yellow-500"}`}
-            />
-            {connected ? "Connected" : "Connecting..."}
+            <button
+              onClick={joinRoom}
+              disabled={!username.trim() || !roomId.trim() || !connected}
+              className="mt-2 w-full rounded-xl bg-blue-600 py-3.5 text-sm font-bold text-white transition-all hover:bg-blue-500 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed disabled:scale-100 shadow-lg shadow-blue-600/20"
+            >
+              Enter Room
+            </button>
+
+            <div className="flex items-center justify-center gap-2 mt-2">
+              <span className={`relative flex h-2 w-2`}>
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${connected ? "bg-emerald-400" : "bg-amber-400"}`}></span>
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${connected ? "bg-emerald-500" : "bg-amber-500"}`}></span>
+              </span>
+              <span className="text-xs font-medium text-gray-500 uppercase tracking-widest">
+                {connected ? "Server Ready" : "Establishing Link..."}
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -141,33 +250,46 @@ function App() {
   }
 
   return (
-    <div className="flex h-screen w-screen flex-col bg-gray-950 text-white">
-      {/* Header */}
-      <header className="flex items-center justify-between border-b border-gray-800 bg-gray-900 px-6 py-4">
-        <div>
-          <h1 className="font-bold text-base"># {roomId}</h1>
-          <p className="text-xs text-gray-400">You are {username}</p>
+    <div className="flex h-screen w-screen flex-col bg-black text-white selection:bg-blue-500/30">
+      {/* Dynamic Header */}
+      <header className="relative z-10 flex items-center justify-between border-b border-white/10 bg-black/40 px-6 py-4 backdrop-blur-xl">
+        <div className="flex items-center gap-4">
+           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/20">
+              <span className="font-bold">#</span>
+           </div>
+           <div>
+            <h1 className="text-lg font-bold tracking-tight">{roomId}</h1>
+            <p className="text-xs text-gray-500">Connected as <span className="text-blue-400 font-semibold">{username}</span></p>
+          </div>
         </div>
-        <div className="flex items-center gap-2 text-xs text-gray-400">
-          <span
-            className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`}
-          />
-          {connected ? "Connected" : "Disconnected"}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/5">
+            <span className={`h-1.5 w-1.5 rounded-full ${connected ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]" : "bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.6)]"}`} />
+            <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">
+               {connected ? "Encrypted" : "Offline"}
+            </span>
+          </div>
         </div>
       </header>
 
-      {/* Messages */}
-      <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-4 py-4">
+      {/* Message Feed */}
+      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4 custom-scrollbar pattern-bg">
         {messages.length === 0 && (
-          <p className="text-center text-sm text-gray-600 mt-8">
-            No messages yet. Say hello!
-          </p>
+          <div className="flex flex-col items-center justify-center h-full opacity-20 pointer-events-none">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M17 8h2a2 2 0 012 2v6a2 2 0 01-2 2h-2v4l-4-4H9a1.994 1.994 0 01-1.414-.586m0 0L11 14h4a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2v4l.586-.586z" />
+            </svg>
+            <p className="text-lg font-medium">Broadcast something to the room</p>
+          </div>
         )}
+        
         {messages.map((msg, i) => {
           if (msg.type === "system") {
             return (
-              <div key={i} className="my-1 text-center text-xs text-gray-500">
-                {msg.message}
+              <div key={i} className="flex justify-center">
+                <span className="px-3 py-1 rounded-full bg-white/5 border border-white/5 text-[10px] font-bold uppercase tracking-[0.2em] text-gray-500">
+                  {msg.message}
+                </span>
               </div>
             );
           }
@@ -176,43 +298,61 @@ function App() {
           return (
             <div
               key={i}
-              className={`flex flex-col gap-1 ${isOwn ? "items-end self-end" : "items-start self-start"} max-w-[70%]`}
+              className={`flex w-full group animate-in fade-in slide-in-from-bottom-2 duration-300 ${isOwn ? "justify-end" : "justify-start"}`}
             >
-              <span className="px-1 text-xs text-gray-400">
-                {isOwn ? "You" : msg.username}
-              </span>
-              <div
-                className={`break-words rounded-2xl px-4 py-2 text-sm ${
-                  isOwn
-                    ? "rounded-br-sm bg-blue-600"
-                    : "rounded-bl-sm bg-gray-800"
-                }`}
-              >
-                {msg.message}
+              <div className={`flex flex-col max-w-[80%] md:max-w-[60%] ${isOwn ? "items-end" : "items-start"}`}>
+                <div className="flex items-center gap-2 mb-1.5 px-1">
+                   <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">
+                    {isOwn ? "You" : msg.username}
+                  </span>
+                  <span className="text-[9px] text-gray-700 font-medium">
+                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+                <div
+                  className={`relative px-4 py-3 text-sm leading-relaxed shadow-lg ${
+                    isOwn
+                      ? "bg-blue-600 text-white rounded-2xl rounded-tr-none shadow-blue-600/10 border border-blue-500/20"
+                      : "bg-white/5 text-gray-200 rounded-2xl rounded-tl-none border border-white/10"
+                  }`}
+                >
+                  {msg.message}
+                </div>
               </div>
             </div>
           );
         })}
-        <div ref={bottomRef} />
+        {otherTypingUsers && (
+           <div className="flex justify-start animate-pulse">
+            <span className="text-[10px] font-bold text-blue-500 uppercase tracking-widest italic ml-1">
+              {otherTypingUsers}
+            </span>
+          </div>
+        )}
+        <div ref={bottomRef} className="h-4" />
       </div>
 
-      {/* Input */}
-      <footer className="border-t border-gray-800 bg-gray-900 px-4 py-4">
-        <div className="mx-auto flex max-w-3xl gap-2">
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type a message..."
-            autoFocus
-            className="flex-1 rounded-xl border border-gray-700 bg-gray-800 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-          />
+      {/* Input Console */}
+      <footer className="relative border-t border-white/5 bg-black/40 p-6 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-4xl gap-3">
+          <div className="relative flex-1">
+            <input
+              value={input}
+              onChange={(e) => handeInputChange(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Inject message..."
+              autoFocus
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-sm text-white placeholder:text-gray-600 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 outline-none transition-all shadow-inner"
+            />
+          </div>
           <button
             onClick={sendMessage}
             disabled={!input.trim()}
-            className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+            className="group flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-600 text-white transition-all hover:bg-blue-500 active:scale-90 disabled:opacity-20 disabled:grayscale disabled:cursor-not-allowed shadow-lg shadow-blue-600/20"
           >
-            Send
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 transform rotate-90 transition-transform group-hover:translate-x-1 group-hover:-translate-y-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+            </svg>
           </button>
         </div>
       </footer>
