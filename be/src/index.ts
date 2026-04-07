@@ -6,98 +6,96 @@ import { createServer } from 'http';
 const app = express();
 const port = process.env.PORT || 8080;
 
-// Serve static files from the frontend dist directory
 const frontendPath = path.resolve(__dirname, '../../fe/dist');
-console.log("Frontend Path:", frontendPath);
 app.use(express.static(frontendPath));
-
-// Catch-all route for SPA - serve index.html for any route
-app.use((req, res) => {
+app.use((_req, res) => {
     res.sendFile(path.resolve(frontendPath, 'index.html'));
 });
 
-// Create HTTP server and attach WebSocket
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
 interface User {
     socket: WebSocket;
     room: string;
+    username: string;
 }
 
 interface Message {
     message: string;
+    username: string;
     timestamp: number;
 }
 
 let allSockets: User[] = [];
-// Store message history per room (in-memory)
-let roomMessages: Map<string, Message[]> = new Map();
+const roomMessages: Map<string, Message[]> = new Map();
 
-wss.on("connection", (socket) => {
+function broadcast(room: string, payload: object, exclude?: WebSocket) {
+    const data = JSON.stringify(payload);
+    allSockets.forEach((user) => {
+        if (user.room === room && user.socket !== exclude) {
+            user.socket.send(data);
+        }
+    });
+}
 
-    socket.on("message", (message) => {
+wss.on('connection', (socket) => {
+    socket.on('message', (data) => {
         try {
-            const parsedMessage = JSON.parse(message.toString());
+            const parsed = JSON.parse(data.toString());
 
-            if (parsedMessage.type == "join") {
-                const roomId = parsedMessage.payload.roomId;
-                console.log("User joined room " + roomId);
+            if (parsed.type === 'join') {
+                const { roomId, username } = parsed.payload;
+                allSockets.push({ socket, room: roomId, username });
 
-                allSockets.push({
-                    socket,
-                    room: roomId
-                });
-
-                // Send message history to the newly joined user
+                // Send history to the new user
                 const history = roomMessages.get(roomId) || [];
-                if (history.length > 0) {
-                    socket.send(JSON.stringify({
-                        type: "history",
-                        payload: {
-                            messages: history.map(m => m.message)
-                        }
-                    }));
-                }
+                socket.send(JSON.stringify({
+                    type: 'history',
+                    payload: { messages: history },
+                }));
+
+                // Notify others in the room
+                broadcast(roomId, {
+                    type: 'system',
+                    payload: { message: `${username} joined the room` },
+                }, socket);
             }
 
-            if (parsedMessage.type == "chat") {
-                console.log("user wants to chat");
-                const currentUserRoom = allSockets.find((x) => x.socket == socket)?.room;
+            if (parsed.type === 'chat') {
+                const currentUser = allSockets.find((x) => x.socket === socket);
+                if (!currentUser) return;
 
-                if (currentUserRoom) {
-                    const message = parsedMessage.payload.message;
+                const msg: Message = {
+                    message: parsed.payload.message,
+                    username: currentUser.username,
+                    timestamp: Date.now(),
+                };
 
-                    // Store message in room history
-                    if (!roomMessages.has(currentUserRoom)) {
-                        roomMessages.set(currentUserRoom, []);
-                    }
-                    roomMessages.get(currentUserRoom)!.push({
-                        message,
-                        timestamp: Date.now()
-                    });
-
-                    // Broadcast to all users in the room
-                    allSockets.forEach((user) => {
-                        if (user.room == currentUserRoom) {
-                            user.socket.send(message);
-                        }
-                    })
+                if (!roomMessages.has(currentUser.room)) {
+                    roomMessages.set(currentUser.room, []);
                 }
+                roomMessages.get(currentUser.room)!.push(msg);
+
+                broadcast(currentUser.room, { type: 'chat', payload: msg });
             }
         } catch (e) {
-            console.error("Error processing message:", e);
+            console.error('Error processing message:', e);
         }
     });
 
-    socket.on("close", () => {
-        allSockets = allSockets.filter((x) => x.socket != socket);
+    socket.on('close', () => {
+        const user = allSockets.find((x) => x.socket === socket);
+        if (user) {
+            allSockets = allSockets.filter((x) => x.socket !== socket);
+            broadcast(user.room, {
+                type: 'system',
+                payload: { message: `${user.username} left the room` },
+            });
+        }
     });
-
-})
-
-// Start server
-server.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
 });
 
+server.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+});
