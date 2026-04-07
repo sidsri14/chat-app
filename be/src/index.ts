@@ -43,6 +43,15 @@ function broadcast(room: string, payload: object, exclude?: WebSocket) {
     });
 }
 
+function broadcastUsersList(room: string) {
+    const usersInRoom = allSockets.filter(u => u.room === room).map(u => u.username);
+    const uniqueUsers = Array.from(new Set(usersInRoom));
+    broadcast(room, {
+        type: 'users_list',
+        payload: { users: uniqueUsers }
+    });
+}
+
 wss.on('connection', (socket) => {
     socket.on('message', (data) => {
         try {
@@ -70,6 +79,8 @@ wss.on('connection', (socket) => {
                     type: 'system',
                     payload: { message: `${username} joined the room` },
                 }, socket);
+                
+                broadcastUsersList(roomId);
             }
 
             if (parsed.type === 'chat') {
@@ -115,6 +126,7 @@ wss.on('connection', (socket) => {
                 type: 'system',
                 payload: { message: `${user.username} left the room` },
             });
+            broadcastUsersList(user.room);
         }
     });
 });

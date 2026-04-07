@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import ReactMarkdown from 'react-markdown';
+
 
 type ChatMessage = {
   type: "chat";
@@ -22,6 +24,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [input, setInput] = useState("");
   const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
+  const [roomUsers, setRoomUsers] = useState<string[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -104,6 +107,8 @@ function App() {
             else next.delete(typingUser);
             return next;
           });
+        } else if (parsed.type === "users_list") {
+          setRoomUsers(parsed.payload.users);
         }
       } catch {
         // ignore malformed messages
@@ -250,7 +255,8 @@ function App() {
   }
 
   return (
-    <div className="flex h-screen w-screen flex-col bg-black text-white selection:bg-blue-500/30">
+    <div className="flex h-screen w-screen bg-black text-white selection:bg-blue-500/30">
+      <div className="flex-1 flex flex-col min-w-0">
       {/* Dynamic Header */}
       <header className="relative z-10 flex items-center justify-between border-b border-white/10 bg-black/40 px-6 py-4 backdrop-blur-xl">
         <div className="flex items-center gap-4">
@@ -316,7 +322,11 @@ function App() {
                       : "bg-white/5 text-gray-200 rounded-2xl rounded-tl-none border border-white/10"
                   }`}
                 >
-                  {msg.message}
+                  <div className="text-sm break-words [&>p]:mb-2 [&>p:last-child]:mb-0 [&_ul]:list-disc [&_ul]:ml-4 [&_ol]:list-decimal [&_ol]:ml-4 [&_strong]:text-blue-100">
+                    <ReactMarkdown>
+                      {msg.message || ""}
+                    </ReactMarkdown>
+                  </div>
                 </div>
               </div>
             </div>
@@ -356,6 +366,22 @@ function App() {
           </button>
         </div>
       </footer>
+      </div>
+
+      {/* Online Users Sidebar */}
+      <div className="hidden md:flex w-64 border-l border-white/10 bg-black/40 backdrop-blur-xl flex-col">
+        <div className="p-4 border-b border-white/10">
+          <h2 className="text-xs font-bold uppercase tracking-widest text-gray-500">Online — {roomUsers.length}</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+          {roomUsers.map((u) => (
+            <div key={u} className="flex items-center gap-3">
+              <span className={`h-2 w-2 rounded-full ${u === username ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.6)]'}`} />
+              <span className={`text-sm tracking-wide ${u === username ? 'font-bold text-white' : 'text-gray-300'}`}>{u} {u === username && <span className="text-gray-500 text-xs font-normal ml-1">(You)</span>}</span>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

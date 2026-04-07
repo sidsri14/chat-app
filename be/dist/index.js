@@ -31,6 +31,14 @@ function broadcast(room, payload, exclude) {
         }
     });
 }
+function broadcastUsersList(room) {
+    const usersInRoom = allSockets.filter(u => u.room === room).map(u => u.username);
+    const uniqueUsers = Array.from(new Set(usersInRoom));
+    broadcast(room, {
+        type: 'users_list',
+        payload: { users: uniqueUsers }
+    });
+}
 wss.on('connection', (socket) => {
     socket.on('message', (data) => {
         var _a, _b, _c, _d;
@@ -56,6 +64,7 @@ wss.on('connection', (socket) => {
                     type: 'system',
                     payload: { message: `${username} joined the room` },
                 }, socket);
+                broadcastUsersList(roomId);
             }
             if (parsed.type === 'chat') {
                 const currentUser = allSockets.find((x) => x.socket === socket);
@@ -97,6 +106,7 @@ wss.on('connection', (socket) => {
                 type: 'system',
                 payload: { message: `${user.username} left the room` },
             });
+            broadcastUsersList(user.room);
         }
     });
 });
