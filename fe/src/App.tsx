@@ -69,7 +69,7 @@ function App() {
   }, [messages]);
 
   const joinRoom = () => {
-    if (!username.trim() || !roomId.trim() || !wsRef.current) return;
+    if (!username.trim() || !roomId.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     wsRef.current.send(
       JSON.stringify({
         type: "join",
@@ -80,7 +80,7 @@ function App() {
   };
 
   const sendMessage = () => {
-    if (!input.trim() || !wsRef.current) return;
+    if (!input.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     wsRef.current.send(
       JSON.stringify({ type: "chat", payload: { message: input.trim() } })
     );
@@ -123,7 +123,7 @@ function App() {
 
           <button
             onClick={joinRoom}
-            disabled={!username.trim() || !roomId.trim()}
+            disabled={!username.trim() || !roomId.trim() || !connected}
             className="rounded-lg bg-blue-600 py-3 text-sm font-semibold transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Join Room
